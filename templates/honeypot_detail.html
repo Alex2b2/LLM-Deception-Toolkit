@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block content %}
+<h2>Honeypot Activity: {{ user_ip }}</h2>
+<p>Total Hits: {{ hits|length }}</p>
+<table class="table table-striped mt-2">
+    <thead>
+        <tr><th>#</th><th>Timestamp</th></tr>
+    </thead>
+    <tbody>
+        {% for hit in hits %}
+        <tr>
+            <td>{{ loop.index }}</td>  <!-- Use loop.index instead of enumerate -->
+            <td>{{ hit.timestamp }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+<a href="/honeypot_logs" class="btn btn-secondary mt-2">Back to Honeypot Logs</a>
+{% endblock %}

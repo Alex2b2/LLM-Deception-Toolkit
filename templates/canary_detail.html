@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Canary File: {{ filename }}</h2>
+
+<!-- Style for highlighting semantic traps -->
+<style>
+    .semantic-trap {
+        color: red;
+        font-weight: bold;
+        background-color: #f8d7da;
+        padding: 5px;
+        border-radius: 3px;
+        margin: 2px 0;
+    }
+</style>
+
+<!-- Show content with highlighted semantic traps -->
+<pre class="border p-3 bg-light">
+    {% for line in content.splitlines() %}
+        {% if 'SEMANTIC_TRAP' in line or 'HIDDEN INSTRUCTION' in line %}
+            <span class="semantic-trap">{{ line }}</span>
+        {% else %}
+            {{ line }}
+        {% endif %}
+    {% endfor %}
+</pre>
+
+<a href="/canaries" class="btn btn-secondary mt-2">Back to Canary List</a>
+{% endblock %}

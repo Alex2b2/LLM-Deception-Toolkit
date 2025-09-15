@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+<h2 class="mb-4">Canary Files</h2>
+<ul class="list-group">
+    {% for file in files %}
+    <li class="list-group-item">
+        <a href="/canary/{{ file }}">{{ file }}</a>
+    </li>
+    {% endfor %}
+</ul>
+{% endblock %}

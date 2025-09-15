@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="row">
+    <!-- Recent Honeypot Hits -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <i class="fas fa-bug"></i> Recent Honeypot Hits
+            </div>
+            <div class="card-body">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>IP Address</th>
+                            <th>Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for hit in honeypot %}
+                        <tr>
+                            <td><a href="/honeypot/{{ hit.user_ip }}">{{ hit.user_ip }}</a></td>
+                            <td>{{ hit.timestamp }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recent Canary Triggers -->
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <i class="fas fa-code"></i> Recent Canary Triggers
+            </div>
+            <div class="card-body">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>File</th>
+                            <th>Timestamp</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for trigger in canary %}
+                        <tr>
+                            <td><a href="/canary/{{ trigger.file }}">{{ trigger.file }}</a></td>
+                            <td>{{ trigger.timestamp }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Info Alert -->
+<div class="alert alert-info mt-4">
+    <strong>Tip:</strong> The tables above show the most recent honeypot interactions and canary triggers. Click on the IPs or filenames for detailed logs.
+</div>
+
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js" integrity="sha384-..."></script>
+<script>
+    const socket = io();
+
+    socket.on('update_dashboard', data => {
+        const honeypotTable = document.querySelector("#honeypot-table tbody");
+        honeypotTable.innerHTML = "";
+        data.honeypot.forEach(hit => {
+            honeypotTable.innerHTML += `<tr><td><a href="/honeypot/${hit.user_ip}">${hit.user_ip}</a></td><td>${hit.timestamp}</td></tr>`;
+        });
+
+        const canaryTable = document.querySelector("#canary-table tbody");
+        canaryTable.innerHTML = "";
+        data.canary.forEach(trigger => {
+            canaryTable.innerHTML += `<tr><td><a href="/canary/${trigger.file}">${trigger.file}</a></td><td>${trigger.timestamp}</td></tr>`;
+        });
+    });
+</script>
+{% endblock %}
