@@ -65,28 +65,30 @@ This project explores a deception-based approach: place traps where an automated
 
 ### 1. Clone the repository
 
-bash
+```bash
 git clone https://github.com/Alex2b2/LLM-Deception-Toolkit.git
 cd LLM-Deception-Toolkit
-
+```
 
 ### 2. Create a virtual environment and install dependencies
 
-bash
+```bash
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-
+```
 
 ### 3. Set environment variables
 
 Copy `.env.example` to `.env`, or export the variables in your shell:
 
-bash
+```bash
 export MONGO_URI="mongodb://localhost:27017/"
 export SLACK_TOKEN="your-slack-bot-token"      # optional
 export SLACK_CHANNEL="your-slack-channel-id"   # optional
+```
 
+Do not commit real tokens. See [Security notes](#security-notes).
 
 ### 4. Start MongoDB
 
@@ -94,9 +96,9 @@ Make sure MongoDB is running and reachable at the URI you set.
 
 ### 5. Run the app
 
-bash
+```bash
 python app.py
-
+```
 
 Then open http://localhost:5000 to see the dashboard.
 
@@ -131,6 +133,7 @@ Only deploy this on systems you own or are explicitly authorised to monitor.
 
 ## Project structure
 
+```
 LLM-Deception-Toolkit/
 ├── app.py              # Flask application, routes and real-time events
 ├── config.py           # Configuration and thresholds
@@ -141,7 +144,7 @@ LLM-Deception-Toolkit/
 ├── requirements.txt    # Python dependencies
 ├── CONTRIBUTING.md
 └── LICENSE
-
+```
 
 ## Threat model and limitations
 
