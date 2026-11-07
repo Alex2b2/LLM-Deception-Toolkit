@@ -29,7 +29,12 @@
 
 ## 🚀 Installation & Setup
 
-### 1. Clone the repository:
+### 1. Clone the repository: ### 1. Clone the repository
+
+```bash
+git clone https://github.com/Alex2b2/LLM-Deception-Toolkit.git
+cd LLM-Deception-Toolkit
+```
 
 ```bash
 git clone https://github.com/your-username/llm-deception-toolkit.git
