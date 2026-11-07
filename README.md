@@ -119,7 +119,6 @@ Settings live in `config.py`. Secrets are read from environment variables.
 
 If `SLACK_TOKEN` is not set, the app should run without sending Slack alerts.
 
-<!-- VERIFY: confirm app.py handles a missing SLACK_TOKEN without crashing. -->
 
 ## Usage
 
