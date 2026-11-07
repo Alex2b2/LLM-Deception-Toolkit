@@ -6,3 +6,17 @@ __pycache__/
 .DS_Store
 *.log
 
+# Virtual environments
+venv/
+.venv/
+pyvenv.cfg
+
+# Secrets and local config
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+
+# OS files
+.DS_Store
