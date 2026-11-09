@@ -1,29 +1,39 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Canary File: {{ filename }}</h2>
+{% if token %}<p class="text-muted">Token: <code>{{ token }}</code></p>{% endif %}
 
-<!-- Style for highlighting semantic traps -->
 <style>
     .semantic-trap {
-        color: red;
+        color: #842029;
         font-weight: bold;
         background-color: #f8d7da;
-        padding: 5px;
-        border-radius: 3px;
-        margin: 2px 0;
+        display: block;
     }
 </style>
 
-<!-- Show content with highlighted semantic traps -->
-<pre class="border p-3 bg-light">
-    {% for line in content.splitlines() %}
-        {% if 'SEMANTIC_TRAP' in line or 'HIDDEN INSTRUCTION' in line %}
-            <span class="semantic-trap">{{ line }}</span>
+<!-- Lines containing the canary token are the traps -->
+<pre class="border p-3 bg-light">{% for line in content.splitlines() %}{% if token and token in line %}<span class="semantic-trap">{{ line }}</span>{% else %}{{ line }}
+{% endif %}{% endfor %}</pre>
+
+<h4 class="mt-4">Triggers</h4>
+<table class="table table-striped">
+    <thead>
+        <tr><th>Timestamp</th><th>Trigger</th><th>IP Address</th><th>User agent</th></tr>
+    </thead>
+    <tbody>
+        {% for t in triggers %}
+        <tr>
+            <td>{{ t.timestamp }}</td>
+            <td>{{ t.trigger }}</td>
+            <td>{{ t.user_ip }}</td>
+            <td><small>{{ t.user_agent }}</small></td>
+        </tr>
         {% else %}
-            {{ line }}
-        {% endif %}
-    {% endfor %}
-</pre>
+        <tr><td colspan="4">Not triggered yet.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
 
 <a href="/canaries" class="btn btn-secondary mt-2">Back to Canary List</a>
 {% endblock %}

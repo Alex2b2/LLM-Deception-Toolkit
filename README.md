@@ -1,7 +1,8 @@
 # LLM Deception Toolkit
 
 ![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue.svg)
-![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![tests](https://github.com/Alex2b2/LLM-Deception-Toolkit/actions/workflows/tests.yml/badge.svg)
 
 A web application that uses **honeypots** and **LLM-aware canaries** to detect, log and alert on automated and AI-agent activity. It records suspicious interactions in MongoDB, shows them on a real-time dashboard, and can send alerts to Slack.
 
@@ -39,13 +40,15 @@ This project explores a deception-based approach: place traps where an automated
 
 ## How it works
 
-1. A Flask app serves honeypot endpoints and hosts canary content.
-2. Each request is logged to MongoDB. If a client exceeds the request threshold inside the time window (default: 5 requests in 30 seconds), it is flagged as a honeypot hit.
-3. When a canary is touched or acted on, a canary event is recorded with its details.
-4. Flask-SocketIO pushes new events to the dashboard in real time.
-5. If Slack is configured, an alert is sent to your chosen channel.
+1. A Flask app serves trap endpoints and a private dashboard.
+2. **Honeypot:** every `POST /honeypot` request is logged to MongoDB with the client IP and user agent. A client that exceeds the threshold inside the time window (default: 5 requests in 30 seconds) is flagged as a bot, gets HTTP 429, and triggers one Slack alert.
+3. **Canaries:** on start-up the app generates realistic decoy files (onboarding notes, a production settings file, a credentials backup). Each file carries a unique token in two traps:
+   - a callback URL (`/c/<token>`) with an embedded instruction telling AI assistants to fetch it, which catches agents that follow indirect prompt injection;
+   - a fake API key (`sk-live-<token>`) with a "validation" endpoint (`/api/v1/keys/verify`), which catches agents or scripts that harvest and try credentials.
+4. When either trap is hit, the app looks up the token, records which file it came from plus the IP, user agent and trigger type, and returns a plausible response so the agent carries on normally.
+5. Flask-SocketIO pushes new events to the dashboard in real time, and Slack alerts go to your chosen channel if configured.
 
-<!-- VERIFY: confirm the flow above matches app.py, especially how canary triggers are detected. -->
+A human reading a canary file has no reason to call either trap, so a hit is strong evidence of automated or agent behaviour.
 
 ## Screenshots
 
@@ -59,7 +62,7 @@ This project explores a deception-based approach: place traps where an automated
 
 ### Prerequisites
 
-- Python 3.9 or newer
+- Python 3.10 or newer
 - MongoDB (local install or a hosted instance such as MongoDB Atlas)
 - A Slack app with a bot token (optional, for alerts)
 
@@ -80,7 +83,7 @@ pip install -r requirements.txt
 
 ### 3. Set environment variables
 
-Copy `.env.example` to `.env`, or export the variables in your shell:
+Copy `.env.example` to `.env` (loaded automatically), or export the variables in your shell:
 
 ```bash
 export MONGO_URI="mongodb://localhost:27017/"
@@ -100,27 +103,33 @@ Make sure MongoDB is running and reachable at the URI you set.
 python app.py
 ```
 
-Then open http://localhost:5000 to see the dashboard.
+Then open http://localhost:5000 to see the dashboard. Canary files are generated in `canaries/` on first start, and existing ones are kept across restarts.
 
-<!-- VERIFY: confirm the port, and whether app.py loads .env (needs python-dotenv) or relies on exported variables. -->
+### 6. Run the tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
 
 ## Configuration
 
-Settings live in `config.py`. Secrets are read from environment variables.
+All settings are read from environment variables (or `.env`). Defaults live in `config.py`; secrets have no default.
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | `MONGO_URI` | `mongodb://localhost:27017/` | MongoDB connection string |
 | `DB_NAME` | `llm_deception` | Database name |
-| `COLLECTION_INTERACTIONS` | `interactions` | Collection for honeypot and request logs |
-| `COLLECTION_CANARY` | `canary_logs` | Collection for canary events |
+| `CANARY_BASE_URL` | `http://127.0.0.1:5000` | URL canary files point back to. Must be reachable by the agents you monitor |
+| `CANARY_COUNT` | `5` | Number of canary files to keep in `canaries/` |
 | `HONEYPOT_MAX_REQUESTS` | `5` | Requests allowed inside the time window before a client is flagged |
 | `HONEYPOT_TIME_WINDOW` | `30` | Time window in seconds |
-| `SLACK_TOKEN` | none | Slack bot token (environment variable) |
-| `SLACK_CHANNEL` | none | Slack channel ID (environment variable) |
-
-If `SLACK_TOKEN` is not set, the app should run without sending Slack alerts.
-
+| `SLACK_TOKEN` / `SLACK_CHANNEL` | none | Slack bot token and channel ID. Alerts are off if unset |
+| `DASHBOARD_USER` / `DASHBOARD_PASSWORD` | `admin` / none | HTTP Basic auth for the dashboard. Required if `HOST` is not `127.0.0.1` |
+| `HOST` / `PORT` | `127.0.0.1` / `5000` | Bind address |
+| `TRUSTED_PROXIES` | `0` | Number of reverse proxies in front of the app, for correct client IPs |
+| `FLASK_DEBUG` | `false` | Never enable on an exposed deployment |
 
 ## Usage
 
@@ -135,13 +144,17 @@ Only deploy this on systems you own or are explicitly authorised to monitor.
 
 ```
 LLM-Deception-Toolkit/
-├── app.py              # Flask application, routes and real-time events
-├── config.py           # Configuration and thresholds
-├── canaries/           # Canary files containing semantic traps
-├── templates/          # HTML templates for the dashboard
+├── app.py              # Flask app: trap endpoints, dashboard, real-time updates
+├── canaries.py         # Canary templates, token generation and registry
+├── alerts.py           # Slack alerting
+├── config.py           # Configuration from environment variables
+├── canaries/           # Generated canary files (git-ignored)
+├── templates/          # Dashboard HTML templates
+├── tests/              # pytest suite (runs without MongoDB)
 ├── assets/             # Screenshots used in this README
-├── Scripts/            # Helper scripts
-├── requirements.txt    # Python dependencies
+├── .env.example
+├── requirements.txt
+├── requirements-dev.txt
 ├── CONTRIBUTING.md
 └── LICENSE
 ```
@@ -158,9 +171,10 @@ LLM-Deception-Toolkit/
 - It does not block or rate-limit traffic. It observes, logs and alerts.
 - A slow or low-volume client can stay under the request threshold, so rate-based detection can be evaded.
 - Legitimate crawlers or monitoring tools can trigger the honeypot and cause false positives.
-- A canary only fires if an agent reads it and acts on it. Agents that ignore embedded instructions will not trigger it.
+- A canary only fires if an agent reads it and acts on it (fetches the callback URL or tries the fake key). Agents that ignore embedded instructions will not trigger it.
+- Canary files must be placed where agents will find them (a docs site, a shared drive, a repo you control) and `CANARY_BASE_URL` must be reachable from there.
 - It has not been evaluated against a broad set of real-world agents, so detection rates are not yet known.
-- The dashboard should not be exposed to the public internet. Run it on a private network or behind authentication.
+- The dashboard should not be exposed to the public internet. Set `DASHBOARD_PASSWORD` and run it behind HTTPS if it is reachable from other machines.
 
 ## Security notes
 
@@ -171,10 +185,11 @@ LLM-Deception-Toolkit/
 
 ## Roadmap
 
-- [ ] Tests and CI
+- [x] Tests and CI
 - [ ] Docker and one-command setup
 - [ ] Map canary and honeypot events to the OWASP Top 10 for LLM Applications and MITRE ATLAS
-- [ ] Authentication for the dashboard
+- [x] Authentication for the dashboard
+- [x] Token-based canary triggers with file attribution
 - [ ] Tagged releases and a demo write-up with test results
 
 ## Contributing

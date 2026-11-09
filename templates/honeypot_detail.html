@@ -5,13 +5,15 @@
 <p>Total Hits: {{ hits|length }}</p>
 <table class="table table-striped mt-2">
     <thead>
-        <tr><th>#</th><th>Timestamp</th></tr>
+        <tr><th>#</th><th>Timestamp</th><th>Flagged</th><th>User agent</th></tr>
     </thead>
     <tbody>
         {% for hit in hits %}
         <tr>
-            <td>{{ loop.index }}</td>  <!-- Use loop.index instead of enumerate -->
+            <td>{{ loop.index }}</td>
             <td>{{ hit.timestamp }}</td>
+            <td>{% if hit.flagged %}<span class="badge bg-danger">bot</span>{% endif %}</td>
+            <td><small>{{ hit.user_agent }}</small></td>
         </tr>
         {% endfor %}
     </tbody>

@@ -1,11 +1,20 @@
 {% extends "base.html" %}
 {% block content %}
 <h2 class="mb-4">Canary Files</h2>
-<ul class="list-group">
-    {% for file in files %}
-    <li class="list-group-item">
-        <a href="/canary/{{ file }}">{{ file }}</a>
-    </li>
-    {% endfor %}
-</ul>
+<table class="table table-striped">
+    <thead>
+        <tr><th>File</th><th>Created</th><th>Triggers</th></tr>
+    </thead>
+    <tbody>
+        {% for f in files %}
+        <tr>
+            <td><a href="/canary/{{ f.file }}">{{ f.file }}</a></td>
+            <td>{{ f.created_at }}</td>
+            <td>{% if f.triggers %}<span class="badge bg-danger">{{ f.triggers }}</span>{% else %}0{% endif %}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="3">No canaries yet. Start the app with <code>python app.py</code> to generate them.</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
 {% endblock %}

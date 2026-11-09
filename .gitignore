@@ -1,22 +1,24 @@
-# Created by venv; see https://docs.python.org/3/library/venv.html
-venv/
-__pycache__/
-*.pyc
-.env
-.DS_Store
-*.log
-
 # Virtual environments
 venv/
 .venv/
+Scripts/
 pyvenv.cfg
 
 # Secrets and local config
 .env
 
+# Generated canaries (each deployment gets its own tokens)
+canaries/*
+!canaries/.gitkeep
+
 # Python cache
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# Logs
+*.log
 
 # OS files
 .DS_Store
+desktop.ini

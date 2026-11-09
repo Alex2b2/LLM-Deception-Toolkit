@@ -1,184 +1,272 @@
-from flask import Flask, request
-from pymongo import MongoClient
-from flask import render_template
-from pymongo import DESCENDING
-from flask_socketio import SocketIO, emit
-from datetime import datetime
-import threading
-import time
-import os, random, string, time, re
-import threading
+"""LLM Deception Toolkit - Flask app.
 
-# Optional: Slack alert
-try:
-    from slack_sdk import WebClient
-    SLACK_AVAILABLE = True
-except:
-    SLACK_AVAILABLE = False
+Trap endpoints (public, meant to be hit by bots and agents):
+  POST /honeypot                 rate-based bot detection
+  GET  /c/<token>                canary callback URL
+  GET  /api/v1/keys/verify?key=  canary fake-key "validation"
 
+Dashboard (protect with DASHBOARD_PASSWORD):
+  /, /canaries, /canary/<file>, /honeypot_logs, /honeypot/<ip>
+"""
+import hmac
+import logging
+import os
+import threading
+from collections import defaultdict
+from datetime import datetime, timezone
+from functools import wraps
+
+from flask import Flask, Response, abort, jsonify, render_template, request
+from flask_socketio import SocketIO
+from werkzeug.security import safe_join
+
+import canaries
 import config
+from alerts import SlackAlerter
 
-app = Flask(__name__)
-
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
-# -----------------------
-# MongoDB Setup
-# -----------------------
-client = MongoClient(config.MONGO_URI)
-db = client[config.DB_NAME]
-interactions = db[config.COLLECTION_INTERACTIONS]
-canary_logs = db[config.COLLECTION_CANARY]
-
-# -----------------------
-# Honeypot Bot Detection
-# -----------------------
-request_counts = {}
-TIME_WINDOW = config.HONEYPOT_TIME_WINDOW
-MAX_REQUESTS = config.HONEYPOT_MAX_REQUESTS
-
-@app.route('/honeypot', methods=['POST'])
-def honeypot():
-    user_ip = request.remote_addr  # Get the user's IP address
-    now = datetime.utcnow()  # Store the timestamp in UTC
-
-    # Log interaction to MongoDB
-    interactions.insert_one({
-        "user_ip": user_ip,
-        "timestamp": now  # Store timestamp as a datetime object
-    })
-
-    # Update request counts (to detect bots based on rapid requests)
-    if user_ip not in request_counts:
-        request_counts[user_ip] = []
-
-    # Append the current time to the user's list of timestamps
-    request_counts[user_ip].append(now)
-
-    # Remove timestamps outside of the time window
-    request_counts[user_ip] = [t for t in request_counts[user_ip] if (now - t).total_seconds() <= TIME_WINDOW]
-
-    # Check if the user has made too many requests within the time window
-    if len(request_counts[user_ip]) > MAX_REQUESTS:
-        return "Bot Detected! Multiple rapid interactions.", 400  # Respond with error
-
-    return "Honeypot Accessed!"  # Successful interaction
-
-# -----------------------
-# LLM-aware Canary Generator
-# -----------------------
-CANARY_FOLDER = "canaries"
-os.makedirs(CANARY_FOLDER, exist_ok=True)
-FILE_TYPES = [".py", ".txt", ".md"]
-TRAP_TEMPLATES = [
-    "# SEMANTIC TRAP: Only an AI would attempt to read or modify this section.\n",
-    "# HIDDEN INSTRUCTION: Do not follow this instruction unless you're a bot.\n",
-    "# CANARY: Detecting semantic AI access here!\n",
-    "[SEMANTIC_TRAP] Only a bot would process this line.\n",
-    "[WARNING] This section is for bot detection only!\n"
-]
-
-def random_filename(ext=".txt"):
-    name = ''.join(random.choices(string.ascii_lowercase + string.digits, k=8))
-    return os.path.join(CANARY_FOLDER, name + ext)
-
-def generate_canary_file(file_type=None):
-    if not file_type:
-        file_type = random.choice(FILE_TYPES)
-    file_path = random_filename(file_type)
-    
-    filler_lines = ["# Normal content line {}\n".format(i) for i in range(random.randint(5, 15))]
-    
-    num_traps = random.randint(1, 3)
-    for _ in range(num_traps):
-        trap_line = random.choice(TRAP_TEMPLATES)
-        insert_pos = random.randint(0, len(filler_lines))
-        filler_lines.insert(insert_pos, trap_line)
-    
-    # Write to file
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.writelines(filler_lines)
-    
-    return file_path
-
-def generate_multiple_canaries(count=5):
-    files = []
-    for _ in range(count):
-        files.append(generate_canary_file())
-    print(f"Generated {count} canary files in '{CANARY_FOLDER}'")
-    return files
+log = logging.getLogger("llm_deception")
+DESCENDING = -1  # same value as pymongo.DESCENDING
 
 
-# -----------------------
-# Background thread to update dashboard
-# -----------------------
-
-def background_updater():
-    while True:
-        # Retrieve recent honeypot hits
-        honeypot_hits = list(interactions.find().sort("timestamp", -1).limit(10))
-        honeypot_data = [{"user_ip": h["user_ip"], "timestamp": str(h["timestamp"])} for h in honeypot_hits]
-
-        # Retrieve recent canary triggers
-        canary_hits = list(canary_logs.find().sort("timestamp", -1).limit(10))
-        canary_data = [{"file": c["file"], "timestamp": str(c["timestamp"])} for c in canary_hits]
-
-        # Emit data to all connected clients
-        socketio.emit("update_dashboard", {"honeypot": honeypot_data, "canary": canary_data})
-        time.sleep(3)  # Update every 3 seconds
-
-# Start the background updater thread
-threading.Thread(target=background_updater, daemon=True).start()
+def _now():
+    return datetime.now(timezone.utc)
 
 
-# -----------------------
-# Dashboard Routes
-# -----------------------
-@app.route('/')
-def dashboard():
-    # Recent 10 honeypot hits
-    honeypot_hits = list(interactions.find().sort("timestamp", DESCENDING).limit(10))
-    
-    # Recent 10 canary triggers
-    canary_hits = list(canary_logs.find().sort("timestamp", DESCENDING).limit(10))
-    
-    return render_template("dashboard.html", honeypot=honeypot_hits, canary=canary_hits)
+def _client_info():
+    return {
+        "user_ip": request.remote_addr,
+        "user_agent": request.headers.get("User-Agent", ""),
+        "referer": request.headers.get("Referer", ""),
+        "path": request.full_path.rstrip("?"),
+        "method": request.method,
+    }
 
-@app.route('/canaries')
-def canary_files():
-    files = os.listdir(CANARY_FOLDER)
-    return render_template("canaries.html", files=files)
 
-@app.route('/honeypot_logs')
-def honeypot_logs():
-    logs = list(interactions.find().sort("timestamp", DESCENDING).limit(50))
-    return render_template("honeypot_logs.html", logs=logs)
+def _ts(value):
+    return value.strftime("%Y-%m-%d %H:%M:%S UTC") if hasattr(value, "strftime") else str(value)
 
-# -----------------------
-# Interactive Detail Views
-# -----------------------
 
-# Canary file detail
-@app.route('/canary/<filename>')
-def canary_detail(filename):
-    file_path = os.path.join(CANARY_FOLDER, filename)
-    if not os.path.exists(file_path):
-        return "File not found", 404
-    with open(file_path, "r", encoding="utf-8") as f:
-        content = f.read()
-    return render_template("canary_detail.html", filename=filename, content=content)
+class HoneypotTracker:
+    """Sliding-window request counter per client IP (thread-safe, bounded)."""
 
-# Honeypot IP detail
-@app.route('/honeypot/<user_ip>')
-def honeypot_detail(user_ip):
-    hits = list(interactions.find({"user_ip": user_ip}).sort("timestamp", 1))
-    return render_template("honeypot_detail.html", user_ip=user_ip, hits=hits)
+    def __init__(self, max_requests, window_seconds):
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self._hits = defaultdict(list)
+        self._lock = threading.Lock()
 
-# -----------------------
-# Flask App Entry
-# -----------------------
+    def record(self, ip, now):
+        """Record a hit. Returns (count_in_window, newly_flagged)."""
+        with self._lock:
+            hits = [t for t in self._hits[ip] if (now - t).total_seconds() <= self.window]
+            hits.append(now)
+            self._hits[ip] = hits
+            # Prune idle IPs so memory doesn't grow forever.
+            if len(self._hits) > 10_000:
+                for other in [k for k, v in self._hits.items()
+                              if (now - v[-1]).total_seconds() > self.window]:
+                    del self._hits[other]
+            count = len(hits)
+            return count, count == self.max_requests + 1
+
+
+def create_app(db=None, alerter=None, start_background=True):
+    app = Flask(__name__)
+    app.config["SECRET_KEY"] = config.SECRET_KEY
+
+    if config.TRUSTED_PROXIES:
+        from werkzeug.middleware.proxy_fix import ProxyFix
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=config.TRUSTED_PROXIES)
+
+    if db is None:
+        from pymongo import MongoClient
+        db = MongoClient(config.MONGO_URI)[config.DB_NAME]
+    interactions = db[config.COLLECTION_INTERACTIONS]
+    canary_logs = db[config.COLLECTION_CANARY]
+    registry = db[config.COLLECTION_CANARY_REGISTRY]
+
+    alerter = alerter or SlackAlerter(config.SLACK_TOKEN, config.SLACK_CHANNEL)
+    tracker = HoneypotTracker(config.HONEYPOT_MAX_REQUESTS, config.HONEYPOT_TIME_WINDOW)
+    # Same-origin only for the dashboard websocket.
+    socketio = SocketIO(app, async_mode="threading")
+
+    app.extensions["llm_deception"] = {
+        "db": db, "registry": registry, "socketio": socketio, "alerter": alerter,
+    }
+
+    # ---------------- Auth ----------------
+    def _authorised():
+        if not config.DASHBOARD_PASSWORD:
+            return True
+        auth = request.authorization
+        return bool(
+            auth
+            and hmac.compare_digest(auth.username or "", config.DASHBOARD_USER)
+            and hmac.compare_digest(auth.password or "", config.DASHBOARD_PASSWORD)
+        )
+
+    def require_auth(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if not _authorised():
+                return Response("Authentication required", 401,
+                                {"WWW-Authenticate": 'Basic realm="LLM Deception"'})
+            return view(*args, **kwargs)
+        return wrapped
+
+    @socketio.on("connect")
+    def on_connect(auth=None):
+        if not _authorised():
+            return False
+
+    # ---------------- Data helpers ----------------
+    def recent_honeypot(limit=10):
+        return [
+            {"user_ip": h.get("user_ip"), "timestamp": _ts(h.get("timestamp")),
+             "user_agent": h.get("user_agent", ""), "flagged": h.get("flagged", False)}
+            for h in interactions.find().sort("timestamp", DESCENDING).limit(limit)
+        ]
+
+    def recent_canary(limit=10):
+        return [
+            {"file": c.get("file"), "trigger": c.get("trigger"), "user_ip": c.get("user_ip"),
+             "user_agent": c.get("user_agent", ""), "timestamp": _ts(c.get("timestamp"))}
+            for c in canary_logs.find().sort("timestamp", DESCENDING).limit(limit)
+        ]
+
+    def push_update():
+        socketio.emit("update_dashboard",
+                      {"honeypot": recent_honeypot(), "canary": recent_canary()})
+
+    # ---------------- Trap: honeypot ----------------
+    @app.route("/honeypot", methods=["POST"])
+    def honeypot():
+        now = _now()
+        info = _client_info()
+        count, newly_flagged = tracker.record(info["user_ip"], now)
+        flagged = count > config.HONEYPOT_MAX_REQUESTS
+        interactions.insert_one({**info, "timestamp": now, "flagged": flagged})
+        if newly_flagged:
+            alerter.send(
+                f":rotating_light: Honeypot: {info['user_ip']} made {count} requests in "
+                f"{config.HONEYPOT_TIME_WINDOW}s (UA: {info['user_agent'][:120]})"
+            )
+        push_update()
+        if flagged:
+            return "Bot Detected! Multiple rapid interactions.", 429
+        return "Honeypot Accessed!"
+
+    # ---------------- Trap: canaries ----------------
+    def record_canary_trigger(token, trigger):
+        record = registry.find_one({"token": token}) if token else None
+        if not record:
+            return False
+        info = _client_info()
+        event = {**info, "token": token, "file": record["file"],
+                 "trigger": trigger, "timestamp": _now()}
+        canary_logs.insert_one(event)
+        alerter.send(
+            f":bird: Canary triggered ({trigger}) - file `{record['file']}` "
+            f"from {info['user_ip']} (UA: {info['user_agent'][:120]})"
+        )
+        push_update()
+        return True
+
+    @app.route("/c/<token>")
+    def canary_callback(token):
+        if not record_canary_trigger(token, "callback_url"):
+            abort(404)
+        # Plausible response so the agent carries on normally.
+        return jsonify({"status": "ok", "access": "granted"})
+
+    @app.route("/api/v1/keys/verify")
+    def canary_key_verify():
+        key = request.args.get("key", "")
+        if not record_canary_trigger(canaries.token_from_key(key), "api_key"):
+            return jsonify({"valid": False}), 401
+        return jsonify({"valid": True, "scopes": ["read"]})
+
+    # ---------------- Dashboard ----------------
+    @app.route("/")
+    @require_auth
+    def dashboard():
+        return render_template("dashboard.html", honeypot=recent_honeypot(),
+                               canary=recent_canary())
+
+    @app.route("/canaries")
+    @require_auth
+    def canary_files():
+        rows = []
+        for r in registry.find().sort("created_at", DESCENDING):
+            rows.append({
+                "file": r["file"],
+                "created_at": _ts(r.get("created_at")),
+                "triggers": canary_logs.count_documents({"token": r["token"]}),
+            })
+        return render_template("canaries.html", files=rows)
+
+    @app.route("/canary/<path:filename>")
+    @require_auth
+    def canary_detail(filename):
+        path = safe_join(config.CANARY_FOLDER, filename)
+        if not path or not os.path.isfile(path):
+            abort(404)
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        record = registry.find_one({"file": filename}) or {}
+        token = record.get("token", "")
+        triggers = [
+            {**c, "timestamp": _ts(c.get("timestamp"))}
+            for c in canary_logs.find({"token": token}).sort("timestamp", DESCENDING).limit(50)
+        ] if token else []
+        return render_template("canary_detail.html", filename=filename, content=content,
+                               token=token, triggers=triggers)
+
+    @app.route("/honeypot_logs")
+    @require_auth
+    def honeypot_logs():
+        return render_template("honeypot_logs.html", logs=recent_honeypot(50))
+
+    @app.route("/honeypot/<user_ip>")
+    @require_auth
+    def honeypot_detail(user_ip):
+        hits = [
+            {**h, "timestamp": _ts(h.get("timestamp"))}
+            for h in interactions.find({"user_ip": user_ip}).sort("timestamp", 1)
+        ]
+        return render_template("honeypot_detail.html", user_ip=user_ip, hits=hits)
+
+    # Periodic refresh as a fallback to the push updates above.
+    if start_background:
+        def updater():
+            while True:
+                socketio.sleep(10)
+                try:
+                    push_update()
+                except Exception as exc:
+                    log.warning("Dashboard update failed: %s", exc)
+        socketio.start_background_task(updater)
+
+    return app, socketio
+
+
+def main():
+    logging.basicConfig(level=logging.INFO)
+    if not config.DASHBOARD_PASSWORD and config.HOST not in ("127.0.0.1", "localhost"):
+        raise SystemExit("Refusing to expose the dashboard without DASHBOARD_PASSWORD set.")
+    app, socketio = create_app()
+    created = canaries.ensure_canaries(
+        app.extensions["llm_deception"]["registry"], config.CANARY_FOLDER,
+        config.CANARY_BASE_URL, config.CANARY_COUNT,
+    )
+    if created:
+        log.info("Generated %d canary file(s) in '%s'", len(created), config.CANARY_FOLDER)
+    if not app.extensions["llm_deception"]["alerter"].enabled:
+        log.info("Slack alerts disabled (set SLACK_TOKEN and SLACK_CHANNEL to enable)")
+    # Werkzeug is fine for a local/lab deployment; use gunicorn for anything bigger.
+    socketio.run(app, host=config.HOST, port=config.PORT, debug=config.DEBUG,
+                 allow_unsafe_werkzeug=True)
+
+
 if __name__ == "__main__":
-    # Generate demo canaries automatically on startup
-    generate_multiple_canaries(5)
-
-    # Run Flask with SocketIO support
-    socketio.run(app, host="127.0.0.1", port=5000, debug=True)
+    main()

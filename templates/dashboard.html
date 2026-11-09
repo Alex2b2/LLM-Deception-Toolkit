@@ -8,11 +8,12 @@
                 <i class="fas fa-bug"></i> Recent Honeypot Hits
             </div>
             <div class="card-body">
-                <table class="table table-striped">
+                <table class="table table-striped" id="honeypot-table">
                     <thead>
                         <tr>
                             <th>IP Address</th>
                             <th>Timestamp</th>
+                            <th>Flagged</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -20,6 +21,7 @@
                         <tr>
                             <td><a href="/honeypot/{{ hit.user_ip }}">{{ hit.user_ip }}</a></td>
                             <td>{{ hit.timestamp }}</td>
+                            <td>{% if hit.flagged %}<span class="badge bg-danger">bot</span>{% endif %}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -35,10 +37,12 @@
                 <i class="fas fa-code"></i> Recent Canary Triggers
             </div>
             <div class="card-body">
-                <table class="table table-striped">
+                <table class="table table-striped" id="canary-table">
                     <thead>
                         <tr>
                             <th>File</th>
+                            <th>Trigger</th>
+                            <th>IP Address</th>
                             <th>Timestamp</th>
                         </tr>
                     </thead>
@@ -46,6 +50,8 @@
                         {% for trigger in canary %}
                         <tr>
                             <td><a href="/canary/{{ trigger.file }}">{{ trigger.file }}</a></td>
+                            <td>{{ trigger.trigger }}</td>
+                            <td>{{ trigger.user_ip }}</td>
                             <td>{{ trigger.timestamp }}</td>
                         </tr>
                         {% endfor %}
@@ -56,27 +62,50 @@
     </div>
 </div>
 
-<!-- Info Alert -->
 <div class="alert alert-info mt-4">
-    <strong>Tip:</strong> The tables above show the most recent honeypot interactions and canary triggers. Click on the IPs or filenames for detailed logs.
+    <strong>Tip:</strong> The tables update live. Click an IP or filename for detailed logs.
 </div>
 
-<script src="https://cdn.socket.io/4.7.2/socket.io.min.js" integrity="sha384-..."></script>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous"></script>
 <script>
+    // Build rows with textContent so logged values (IPs, file names) can't inject HTML.
+    function cell(text, href) {
+        const td = document.createElement("td");
+        if (href) {
+            const a = document.createElement("a");
+            a.href = href;
+            a.textContent = text;
+            td.appendChild(a);
+        } else {
+            td.textContent = text ?? "";
+        }
+        return td;
+    }
+
+    function fill(tbody, rows, makeCells) {
+        tbody.replaceChildren(...rows.map(r => {
+            const tr = document.createElement("tr");
+            makeCells(r).forEach(td => tr.appendChild(td));
+            return tr;
+        }));
+    }
+
     const socket = io();
-
-    socket.on('update_dashboard', data => {
-        const honeypotTable = document.querySelector("#honeypot-table tbody");
-        honeypotTable.innerHTML = "";
-        data.honeypot.forEach(hit => {
-            honeypotTable.innerHTML += `<tr><td><a href="/honeypot/${hit.user_ip}">${hit.user_ip}</a></td><td>${hit.timestamp}</td></tr>`;
+    socket.on("update_dashboard", data => {
+        fill(document.querySelector("#honeypot-table tbody"), data.honeypot, h => {
+            const flag = cell("");
+            if (h.flagged) {
+                const b = document.createElement("span");
+                b.className = "badge bg-danger";
+                b.textContent = "bot";
+                flag.appendChild(b);
+            }
+            return [cell(h.user_ip, "/honeypot/" + encodeURIComponent(h.user_ip)), cell(h.timestamp), flag];
         });
-
-        const canaryTable = document.querySelector("#canary-table tbody");
-        canaryTable.innerHTML = "";
-        data.canary.forEach(trigger => {
-            canaryTable.innerHTML += `<tr><td><a href="/canary/${trigger.file}">${trigger.file}</a></td><td>${trigger.timestamp}</td></tr>`;
-        });
+        fill(document.querySelector("#canary-table tbody"), data.canary, c => [
+            cell(c.file, "/canary/" + encodeURIComponent(c.file)),
+            cell(c.trigger), cell(c.user_ip), cell(c.timestamp),
+        ]);
     });
 </script>
 {% endblock %}

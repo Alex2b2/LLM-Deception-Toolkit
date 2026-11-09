@@ -11,6 +11,8 @@
                 <tr>
                     <th>IP Address</th>
                     <th>Timestamp</th>
+                    <th>Flagged</th>
+                    <th>User agent</th>
                 </tr>
             </thead>
             <tbody>
@@ -18,6 +20,8 @@
                 <tr>
                     <td><a href="/honeypot/{{ log.user_ip }}">{{ log.user_ip }}</a></td>
                     <td>{{ log.timestamp }}</td>
+                    <td>{% if log.flagged %}<span class="badge bg-danger">bot</span>{% endif %}</td>
+                    <td><small>{{ log.user_agent }}</small></td>
                 </tr>
                 {% endfor %}
             </tbody>
