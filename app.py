@@ -6,7 +6,10 @@ Trap endpoints (public, meant to be hit by bots and agents):
   GET  /api/v1/keys/verify?key=  canary fake-key "validation"
 
 Dashboard (protect with DASHBOARD_PASSWORD):
-  /, /canaries, /canary/<file>, /honeypot_logs, /honeypot/<ip>
+  /, /analytics, /canaries, /canary/<file>, /honeypot_logs, /honeypot/<ip>
+
+IOC feeds (protect with FEED_TOKEN):
+  /feeds/stix.json, /feeds/misp/manifest.json, /feeds/misp/<uuid>.json, /feeds/iocs.csv
 """
 import hmac
 import logging
@@ -20,8 +23,11 @@ from flask import Flask, Response, abort, jsonify, render_template, request
 from flask_socketio import SocketIO
 from werkzeug.security import safe_join
 
+import analytics
 import canaries
 import config
+import enrichment
+import iocs
 from alerts import SlackAlerter
 
 log = logging.getLogger("llm_deception")
@@ -40,6 +46,17 @@ def _client_info():
         "path": request.full_path.rstrip("?"),
         "method": request.method,
     }
+
+
+def _reputation_label(result):
+    if result is None:
+        return "pending"
+    if not result:
+        return ""
+    status = result.get("status")
+    if status == enrichment.STATUS_CHECKED:
+        return "known malicious" if result.get("known_malicious") else "not reported"
+    return {"private": "internal", "disabled": "", "error": "lookup failed"}.get(status, "")
 
 
 def _ts(value):
@@ -70,7 +87,7 @@ class HoneypotTracker:
             return count, count == self.max_requests + 1
 
 
-def create_app(db=None, alerter=None, start_background=True):
+def create_app(db=None, alerter=None, enricher=None, start_background=True):
     app = Flask(__name__)
     app.config["SECRET_KEY"] = config.SECRET_KEY
 
@@ -84,14 +101,18 @@ def create_app(db=None, alerter=None, start_background=True):
     interactions = db[config.COLLECTION_INTERACTIONS]
     canary_logs = db[config.COLLECTION_CANARY]
     registry = db[config.COLLECTION_CANARY_REGISTRY]
+    reputation = db[config.COLLECTION_IP_REPUTATION]
 
     alerter = alerter or SlackAlerter(config.SLACK_TOKEN, config.SLACK_CHANNEL)
+    enricher = enricher or enrichment.Enricher(
+        enrichment.providers_from_config(config), reputation, config.ENRICH_CACHE_HOURS)
     tracker = HoneypotTracker(config.HONEYPOT_MAX_REQUESTS, config.HONEYPOT_TIME_WINDOW)
     # Same-origin only for the dashboard websocket.
     socketio = SocketIO(app, async_mode="threading")
 
     app.extensions["llm_deception"] = {
         "db": db, "registry": registry, "socketio": socketio, "alerter": alerter,
+        "enricher": enricher,
     }
 
     # ---------------- Auth ----------------
@@ -130,13 +151,29 @@ def create_app(db=None, alerter=None, start_background=True):
     def recent_canary(limit=10):
         return [
             {"file": c.get("file"), "trigger": c.get("trigger"), "user_ip": c.get("user_ip"),
-             "user_agent": c.get("user_agent", ""), "timestamp": _ts(c.get("timestamp"))}
+             "user_agent": c.get("user_agent", ""), "timestamp": _ts(c.get("timestamp")),
+             "reputation": _reputation_label(c.get("enrichment", {}))}
             for c in canary_logs.find().sort("timestamp", DESCENDING).limit(limit)
         ]
 
     def push_update():
         socketio.emit("update_dashboard",
                       {"honeypot": recent_honeypot(), "canary": recent_canary()})
+
+    def enrich_and_alert(collection, event_id, ip, message):
+        """Look up the IP's reputation, store it on the event, then alert.
+
+        Runs in the background so the trap responds instantly.
+        """
+        def done(result):
+            collection.update_one({"_id": event_id}, {"$set": {"enrichment": result}})
+            alerter.send(f"{message}\nReputation: {enrichment.describe(result)}")
+            push_update()
+
+        if enricher.enabled:
+            enricher.submit(ip, done)
+        else:
+            alerter.send(message)
 
     # ---------------- Trap: honeypot ----------------
     @app.route("/honeypot", methods=["POST"])
@@ -145,11 +182,13 @@ def create_app(db=None, alerter=None, start_background=True):
         info = _client_info()
         count, newly_flagged = tracker.record(info["user_ip"], now)
         flagged = count > config.HONEYPOT_MAX_REQUESTS
-        interactions.insert_one({**info, "timestamp": now, "flagged": flagged})
+        event_id = interactions.insert_one(
+            {**info, "timestamp": now, "flagged": flagged}).inserted_id
         if newly_flagged:
-            alerter.send(
+            enrich_and_alert(
+                interactions, event_id, info["user_ip"],
                 f":rotating_light: Honeypot: {info['user_ip']} made {count} requests in "
-                f"{config.HONEYPOT_TIME_WINDOW}s (UA: {info['user_agent'][:120]})"
+                f"{config.HONEYPOT_TIME_WINDOW}s (UA: {info['user_agent'][:120]})",
             )
         push_update()
         if flagged:
@@ -163,11 +202,13 @@ def create_app(db=None, alerter=None, start_background=True):
             return False
         info = _client_info()
         event = {**info, "token": token, "file": record["file"],
-                 "trigger": trigger, "timestamp": _now()}
-        canary_logs.insert_one(event)
-        alerter.send(
+                 "trigger": trigger, "timestamp": _now(),
+                 "enrichment": None if enricher.enabled else {"status": "disabled"}}
+        event_id = canary_logs.insert_one(event).inserted_id
+        enrich_and_alert(
+            canary_logs, event_id, info["user_ip"],
             f":bird: Canary triggered ({trigger}) - file `{record['file']}` "
-            f"from {info['user_ip']} (UA: {info['user_agent'][:120]})"
+            f"from {info['user_ip']} (UA: {info['user_agent'][:120]})",
         )
         push_update()
         return True
@@ -236,6 +277,71 @@ def create_app(db=None, alerter=None, start_background=True):
         ]
         return render_template("honeypot_detail.html", user_ip=user_ip, hits=hits)
 
+    # ---------------- Analytics ----------------
+    def _days(default):
+        try:
+            return max(1, min(int(request.args.get("days", default)), 365))
+        except ValueError:
+            return default
+
+    @app.route("/analytics")
+    @require_auth
+    def analytics_page():
+        return render_template("analytics.html",
+                               enrichment_enabled=enricher.enabled,
+                               feed_token_set=bool(config.FEED_TOKEN))
+
+    @app.route("/api/analytics")
+    @require_auth
+    def analytics_data():
+        return jsonify(analytics.compute(db, config, days=_days(30)))
+
+    # ---------------- IOC feeds ----------------
+    def require_feed_auth(view):
+        @wraps(view)
+        def wrapped(*args, **kwargs):
+            if config.FEED_TOKEN:
+                supplied = request.args.get("token", "")
+                header = request.headers.get("Authorization", "")
+                if header.lower().startswith("bearer "):
+                    supplied = header[7:].strip()
+                if not hmac.compare_digest(supplied, config.FEED_TOKEN):
+                    return Response("Invalid feed token", 401)
+                return view(*args, **kwargs)
+            return require_auth(view)(*args, **kwargs)
+        return wrapped
+
+    def current_iocs():
+        return iocs.collect(db, config, days=_days(config.FEED_DAYS),
+                            include_private=config.FEED_INCLUDE_PRIVATE)
+
+    def json_response(obj, mimetype="application/json"):
+        return Response(iocs.dumps(obj), mimetype=mimetype)
+
+    @app.route("/feeds/stix.json")
+    @require_feed_auth
+    def feed_stix():
+        return json_response(iocs.to_stix(current_iocs(), config.ORG_NAME),
+                             "application/stix+json;version=2.1")
+
+    @app.route("/feeds/misp/manifest.json")
+    @require_feed_auth
+    def feed_misp_manifest():
+        return json_response(iocs.to_misp_manifest(iocs.to_misp_event(current_iocs(), config)))
+
+    @app.route("/feeds/misp/<event_uuid>.json")
+    @require_feed_auth
+    def feed_misp_event(event_uuid):
+        if event_uuid != iocs.misp_event_uuid(config):
+            abort(404)
+        return json_response(iocs.to_misp_event(current_iocs(), config))
+
+    @app.route("/feeds/iocs.csv")
+    @require_feed_auth
+    def feed_csv():
+        return Response(iocs.to_csv(current_iocs()), mimetype="text/csv",
+                        headers={"Content-Disposition": "attachment; filename=iocs.csv"})
+
     # Periodic refresh as a fallback to the push updates above.
     if start_background:
         def updater():
@@ -263,6 +369,8 @@ def main():
         log.info("Generated %d canary file(s) in '%s'", len(created), config.CANARY_FOLDER)
     if not app.extensions["llm_deception"]["alerter"].enabled:
         log.info("Slack alerts disabled (set SLACK_TOKEN and SLACK_CHANNEL to enable)")
+    providers = [p.name for p in app.extensions["llm_deception"]["enricher"].providers]
+    log.info("IP reputation providers: %s", ", ".join(providers) or "none configured")
     # Werkzeug is fine for a local/lab deployment; use gunicorn for anything bigger.
     socketio.run(app, host=config.HOST, port=config.PORT, debug=config.DEBUG,
                  allow_unsafe_werkzeug=True)

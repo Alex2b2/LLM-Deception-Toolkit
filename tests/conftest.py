@@ -62,6 +62,21 @@ class FakeCollection:
         doc = dict(doc)
         doc.setdefault("_id", len(self.docs) + 1)
         self.docs.append(doc)
+        return types.SimpleNamespace(inserted_id=doc["_id"])
+
+    def update_one(self, flt, update):
+        for d in self.docs:
+            if self._match(d, flt):
+                d.update(update.get("$set", {}))
+                return
+
+    def replace_one(self, flt, doc, upsert=False):
+        for i, d in enumerate(self.docs):
+            if self._match(d, flt):
+                self.docs[i] = {"_id": d["_id"], **doc}
+                return
+        if upsert:
+            self.insert_one(doc)
 
     def find(self, flt=None):
         return FakeCursor(d for d in self.docs if self._match(d, flt))
@@ -100,10 +115,35 @@ def env(tmp_path, monkeypatch):
 
     import app as app_module
 
+    import enrichment
+
     db = FakeDB()
     alerter = RecordingAlerter()
-    flask_app, socketio = app_module.create_app(db=db, alerter=alerter, start_background=False)
+    provider = FakeProvider()
+    enricher = enrichment.Enricher([provider], db[config.COLLECTION_IP_REPUTATION],
+                                   synchronous=True)
+    flask_app, socketio = app_module.create_app(db=db, alerter=alerter, enricher=enricher,
+                                                start_background=False)
     flask_app.testing = True
     return types.SimpleNamespace(
         app=flask_app, client=flask_app.test_client(), db=db, alerter=alerter, config=config,
+        provider=provider,
     )
+
+
+class FakeProvider:
+    """Reputation provider that flags IPs listed in ``bad``."""
+    name = "fake"
+
+    def __init__(self, bad=("185.220.101.1",)):
+        self.bad = set(bad)
+        self.calls = []
+
+    def lookup(self, ip):
+        self.calls.append(ip)
+        return {"malicious": ip in self.bad, "score": 100 if ip in self.bad else 0}
+
+
+def public_client(env, ip, ua="TestAgent/1.0"):
+    """Request kwargs that make the request look like it came from ``ip``."""
+    return {"environ_base": {"REMOTE_ADDR": ip}, "headers": {"User-Agent": ua}}

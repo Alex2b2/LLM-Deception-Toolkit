@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+    .viz-root {
+        --surface-1: #fcfcfb;
+        --text-primary: #0b0b0b;
+        --text-secondary: #52514e;
+        --grid: #e6e5e1;
+        --series-1: #2a78d6; /* blue */
+        --series-2: #eb6834; /* orange */
+    }
+    .viz-root .stat { background: var(--surface-1); border: 1px solid var(--grid); border-radius: 8px; padding: 1rem 1.25rem; height: 100%; }
+    .viz-root .stat .value { font-size: 2rem; font-weight: 600; color: var(--text-primary); line-height: 1.1; }
+    .viz-root .stat .label { color: var(--text-secondary); font-size: .875rem; }
+    .viz-root .stat .sub { color: var(--text-secondary); font-size: .75rem; margin-top: .25rem; }
+    .viz-root .panel { background: var(--surface-1); border: 1px solid var(--grid); border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; }
+    .viz-root .panel h5 { color: var(--text-primary); font-size: 1rem; margin-bottom: .25rem; }
+    .viz-root .panel .desc { color: var(--text-secondary); font-size: .8rem; margin-bottom: .75rem; }
+    .viz-root .chart-box { position: relative; height: 280px; }
+    .viz-root .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+    .viz-root table { font-size: .85rem; }
+    .viz-root td.num, .viz-root th.num { text-align: right; font-variant-numeric: tabular-nums; }
+    .viz-root .empty { color: var(--text-secondary); font-size: .85rem; }
+</style>
+
+<div class="viz-root">
+    <div class="d-flex flex-wrap align-items-center justify-content-between mb-3 gap-2">
+        <h2 class="mb-0">Analytics</h2>
+        <div class="d-flex align-items-center gap-2">
+            <div class="btn-group btn-group-sm" role="group" aria-label="Date range" id="range">
+                <button type="button" class="btn btn-outline-secondary" data-days="7">7 days</button>
+                <button type="button" class="btn btn-outline-secondary active" data-days="30">30 days</button>
+                <button type="button" class="btn btn-outline-secondary" data-days="90">90 days</button>
+            </div>
+            <div class="dropdown">
+                <button class="btn btn-sm btn-outline-secondary dropdown-toggle" data-bs-toggle="dropdown">IOC feeds</button>
+                <ul class="dropdown-menu dropdown-menu-end">
+                    <li><a class="dropdown-item" href="/feeds/stix.json">STIX 2.1 bundle</a></li>
+                    <li><a class="dropdown-item" href="/feeds/misp/manifest.json">MISP feed manifest</a></li>
+                    <li><a class="dropdown-item" href="/feeds/iocs.csv">CSV</a></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    {% if not enrichment_enabled %}
+    <div class="alert alert-warning py-2 small">
+        IP reputation lookups are off, so attackers show as "not checked". Set
+        <code>ABUSEIPDB_API_KEY</code>, <code>ABUSECH_AUTH_KEY</code> or <code>OTX_API_KEY</code> to enable them.
+    </div>
+    {% endif %}
+
+    <!-- Headline numbers -->
+    <div class="row g-3 mb-4">
+        <div class="col-6 col-lg-3"><div class="stat"><div class="value" id="t-canary">–</div><div class="label">Canary triggers</div></div></div>
+        <div class="col-6 col-lg-3"><div class="stat"><div class="value" id="t-honeypot">–</div><div class="label">Honeypot bot flags</div></div></div>
+        <div class="col-6 col-lg-3"><div class="stat"><div class="value" id="t-ips">–</div><div class="label">Unique source IPs</div></div></div>
+        <div class="col-6 col-lg-3"><div class="stat">
+            <div class="value"><span id="t-new">–</span> <small class="text-muted fs-6">new</small> / <span id="t-known">–</span> <small class="text-muted fs-6">known</small></div>
+            <div class="label">New vs already-known attackers</div>
+            <div class="sub" id="t-unchecked"></div>
+        </div></div>
+    </div>
+
+    <!-- Triggers over time -->
+    <div class="panel">
+        <h5>Triggers over time</h5>
+        <div class="desc">Daily canary triggers and honeypot bot flags (UTC).</div>
+        <div class="chart-box"><canvas id="timeline" aria-label="Daily triggers chart" role="img"></canvas></div>
+    </div>
+
+    <div class="row">
+        <!-- Canary type x trigger -->
+        <div class="col-lg-6">
+            <div class="panel">
+                <h5>Which canaries get triggered, and how</h5>
+                <div class="desc">Triggers per canary type, split by what the agent did.</div>
+                <div class="chart-box"><canvas id="types" aria-label="Triggers by canary type chart" role="img"></canvas></div>
+            </div>
+        </div>
+        <!-- Agents -->
+        <div class="col-lg-6">
+            <div class="panel">
+                <h5>Agents behind canary triggers</h5>
+                <div class="desc">User agents grouped into families. User agents can be spoofed, so treat this as a signal, not proof.</div>
+                <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Agent family</th><th class="num">Triggers</th><th class="num">IPs</th><th>Canary types hit</th></tr></thead>
+                    <tbody id="agents"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Attackers -->
+    <div class="panel">
+        <h5>Source IPs</h5>
+        <div class="desc">Every IP that triggered a canary or was flagged by the honeypot, with its reputation at the time of the hit.</div>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead><tr><th>IP</th><th>Status</th><th class="num">Hits</th><th>Seen by</th><th class="num">AbuseIPDB %</th><th class="num">ThreatFox</th><th class="num">OTX pulses</th><th>Last seen</th></tr></thead>
+                <tbody id="attackers"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- User agents -->
+    <div class="panel">
+        <h5>Top user agents</h5>
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead><tr><th>User agent</th><th>Family</th><th class="num">Triggers</th><th>Last seen</th></tr></thead>
+                <tbody id="uas"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Table view of the charts (accessibility) -->
+    <details class="panel">
+        <summary>View chart data as tables</summary>
+        <div class="row mt-3">
+            <div class="col-lg-6">
+                <table class="table table-sm"><thead><tr><th>Day</th><th class="num">Canary</th><th class="num">Honeypot</th></tr></thead><tbody id="timeline-table"></tbody></table>
+            </div>
+            <div class="col-lg-6">
+                <table class="table table-sm"><thead id="types-head"></thead><tbody id="types-table"></tbody></table>
+            </div>
+        </div>
+    </details>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" crossorigin="anonymous"></script>
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js" crossorigin="anonymous"></script>
+<script>
+(() => {
+    const css = getComputedStyle(document.querySelector(".viz-root"));
+    const v = name => css.getPropertyValue(name).trim();
+    const C = { s1: v("--series-1"), s2: v("--series-2"), ink: v("--text-primary"),
+                ink2: v("--text-secondary"), grid: v("--grid"), surface: v("--surface-1") };
+
+    Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+    Chart.defaults.color = C.ink2;
+
+    const STATUS = { known: "Known malicious", new: "New (not reported)", unchecked: "Not checked", private: "Internal address" };
+    let days = 30, timeline, types;
+
+    // --- small DOM helpers (textContent only: logged values are untrusted) ---
+    function td(text, cls) { const el = document.createElement("td"); el.textContent = text ?? "–"; if (cls) el.className = cls; return el; }
+    function rows(tbody, items, make, emptyCols, emptyText) {
+        if (!items.length) {
+            const tr = document.createElement("tr"); const c = td(emptyText); c.colSpan = emptyCols; c.className = "empty"; tr.appendChild(c);
+            tbody.replaceChildren(tr); return;
+        }
+        tbody.replaceChildren(...items.map(it => { const tr = document.createElement("tr"); make(it).forEach(x => tr.appendChild(x)); return tr; }));
+    }
+    const shortDay = d => new Date(d + "T00:00:00Z").toLocaleDateString(undefined, { day: "numeric", month: "short", timeZone: "UTC" });
+
+    function baseOptions() {
+        return {
+            responsive: true, maintainAspectRatio: false, animation: false,
+            interaction: { mode: "index", intersect: false },
+            plugins: {
+                legend: { position: "top", align: "start", labels: { boxWidth: 10, boxHeight: 10, useBorderRadius: true, borderRadius: 2, color: C.ink } },
+                tooltip: { backgroundColor: "#ffffff", titleColor: C.ink, bodyColor: C.ink, borderColor: C.grid, borderWidth: 1, padding: 10, boxPadding: 4, usePointStyle: true },
+            },
+            scales: {
+                x: { grid: { display: false }, border: { color: C.grid }, ticks: { color: C.ink2, maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+                y: { beginAtZero: true, grid: { color: C.grid }, border: { display: false }, ticks: { color: C.ink2, precision: 0 } },
+            },
+        };
+    }
+
+    function render(data) {
+        const t = data.totals;
+        document.getElementById("t-canary").textContent = t.canary_triggers;
+        document.getElementById("t-honeypot").textContent = t.honeypot_flags;
+        document.getElementById("t-ips").textContent = t.unique_ips;
+        document.getElementById("t-new").textContent = t.new;
+        document.getElementById("t-known").textContent = t.known;
+        document.getElementById("t-unchecked").textContent = t.unchecked ? `${t.unchecked} not checked (internal or no lookup)` : "";
+
+        // Timeline
+        const tl = data.timeline, labels = tl.days.map(shortDay);
+        const lineDs = (label, values, color) => ({ label, data: values, borderColor: color, backgroundColor: color,
+            borderWidth: 2, pointRadius: values.length > 45 ? 0 : 3, pointHoverRadius: 5, pointBorderColor: C.surface, pointBorderWidth: 2, tension: 0 });
+        const tlData = { labels, datasets: [lineDs("Canary triggers", tl.canary, C.s1), lineDs("Honeypot bot flags", tl.honeypot, C.s2)] };
+        if (timeline) { timeline.data = tlData; timeline.update(); }
+        else timeline = new Chart(document.getElementById("timeline"), { type: "line", data: tlData, options: baseOptions() });
+
+        // Canary types (horizontal grouped bars)
+        const keys = Object.keys(data.trigger_labels);
+        const colors = [C.s1, C.s2];
+        const typeData = {
+            labels: data.canary_types.map(r => r.type),
+            datasets: keys.map((k, i) => ({ label: data.trigger_labels[k], data: data.canary_types.map(r => r[k]),
+                backgroundColor: colors[i], borderColor: C.surface, borderWidth: { top: 1, bottom: 1 }, borderRadius: 4,
+                borderSkipped: "start", barPercentage: 0.8, categoryPercentage: 0.7 })),
+        };
+        const typeOpts = baseOptions();
+        typeOpts.indexAxis = "y";
+        typeOpts.interaction = { mode: "nearest", axis: "y", intersect: false };
+        typeOpts.scales = { x: { beginAtZero: true, grid: { color: C.grid }, border: { display: false }, ticks: { color: C.ink2, precision: 0 } },
+                            y: { grid: { display: false }, border: { color: C.grid }, ticks: { color: C.ink } } };
+        if (types) { types.data = typeData; types.update(); }
+        else types = new Chart(document.getElementById("types"), { type: "bar", data: typeData, options: typeOpts });
+
+        // Agents
+        rows(document.getElementById("agents"), data.agents, a => [
+            td(a.family), td(a.hits, "num"), td(a.unique_ips, "num"),
+            td(Object.entries(a.canary_types).map(([k, n]) => `${k} (${n})`).join(", ")),
+        ], 4, "No canary triggers in this period.");
+
+        // Attackers
+        rows(document.getElementById("attackers"), data.attackers, r => [
+            td(r.ip), td(STATUS[r.status] || r.status), td(r.hits, "num"), td(r.sources.join(", ")),
+            td(r.abuseipdb_score, "num"), td(r.threatfox_matches, "num"), td(r.otx_pulses, "num"), td(r.last_seen),
+        ], 8, "No source IPs in this period.");
+
+        // User agents
+        rows(document.getElementById("uas"), data.top_user_agents, u => [
+            td(u.user_agent || "(empty)"), td(u.family), td(u.hits, "num"), td(u.last_seen),
+        ], 4, "No canary triggers in this period.");
+
+        // Table views of the charts
+        rows(document.getElementById("timeline-table"), tl.days.map((d, i) => [d, tl.canary[i], tl.honeypot[i]]),
+             r => [td(r[0]), td(r[1], "num"), td(r[2], "num")], 3, "");
+        const head = document.getElementById("types-head");
+        const htr = document.createElement("tr");
+        [td("Canary type"), ...keys.map(k => td(data.trigger_labels[k], "num"))].forEach(x => { const th = document.createElement("th"); th.textContent = x.textContent; th.className = x.className; htr.appendChild(th); });
+        head.replaceChildren(htr);
+        rows(document.getElementById("types-table"), data.canary_types, r => [td(r.type), ...keys.map(k => td(r[k], "num"))], keys.length + 1, "");
+    }
+
+    async function load() {
+        const resp = await fetch(`/api/analytics?days=${days}`, { credentials: "same-origin" });
+        if (resp.ok) render(await resp.json());
+    }
+
+    document.querySelectorAll("#range button").forEach(btn => btn.addEventListener("click", () => {
+        document.querySelectorAll("#range button").forEach(b => b.classList.toggle("active", b === btn));
+        days = Number(btn.dataset.days);
+        load();
+    }));
+
+    // Refresh when new events arrive (debounced).
+    let pending;
+    try { io().on("update_dashboard", () => { clearTimeout(pending); pending = setTimeout(load, 1500); }); } catch (e) {}
+
+    load();
+})();
+</script>
+{% endblock %}

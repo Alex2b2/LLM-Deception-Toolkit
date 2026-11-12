@@ -17,6 +17,9 @@ A web application that uses **honeypots** and **LLM-aware canaries** to detect, 
 - [Installation and setup](#installation-and-setup)
 - [Configuration](#configuration)
 - [Usage](#usage)
+- [IP reputation enrichment](#ip-reputation-enrichment)
+- [IOC feeds](#ioc-feeds)
+- [Analytics dashboard](#analytics-dashboard)
 - [Project structure](#project-structure)
 - [Threat model and limitations](#threat-model-and-limitations)
 - [Security notes](#security-notes)
@@ -37,6 +40,9 @@ This project explores a deception-based approach: place traps where an automated
 - **Real-time dashboard**: live view of honeypot hits and canary triggers.
 - **MongoDB logging**: every interaction is stored for later review and investigation.
 - **Slack alerts**: optional real-time notifications when a canary fires or suspicious activity is detected.
+- **IP reputation enrichment**: every canary trigger and honeypot flag is checked against AbuseIPDB, abuse.ch ThreatFox and AlienVault OTX, recording whether the source was already known as malicious.
+- **IOC feeds**: source IPs, user agents and triggered canary URLs published as a STIX 2.1 bundle, a MISP feed and CSV.
+- **Analytics**: triggers over time, which agents hit which canary types, and how many attackers were already known versus new.
 
 ## How it works
 
@@ -126,6 +132,16 @@ All settings are read from environment variables (or `.env`). Defaults live in `
 | `HONEYPOT_MAX_REQUESTS` | `5` | Requests allowed inside the time window before a client is flagged |
 | `HONEYPOT_TIME_WINDOW` | `30` | Time window in seconds |
 | `SLACK_TOKEN` / `SLACK_CHANNEL` | none | Slack bot token and channel ID. Alerts are off if unset |
+| `ABUSEIPDB_API_KEY` | none | Enables AbuseIPDB lookups |
+| `ABUSEIPDB_MIN_SCORE` | `50` | AbuseIPDB confidence score (%) treated as malicious |
+| `ABUSECH_AUTH_KEY` | none | Enables abuse.ch ThreatFox lookups |
+| `OTX_API_KEY` | none | Enables AlienVault OTX lookups |
+| `OTX_MIN_PULSES` | `1` | OTX pulse count treated as malicious |
+| `ENRICH_CACHE_HOURS` | `24` | How long a reputation result is reused before re-checking |
+| `FEED_TOKEN` | none | Bearer token for the IOC feeds. If unset, feeds use the dashboard login |
+| `FEED_DAYS` | `30` | Default look-back window for feeds (override with `?days=`) |
+| `FEED_INCLUDE_PRIVATE` | `false` | Include private/internal IPs in feeds |
+| `ORG_NAME` | `LLM Deception Toolkit` | Producer name in STIX and MISP output |
 | `DASHBOARD_USER` / `DASHBOARD_PASSWORD` | `admin` / none | HTTP Basic auth for the dashboard. Required if `HOST` is not `127.0.0.1` |
 | `HOST` / `PORT` | `127.0.0.1` / `5000` | Bind address |
 | `TRUSTED_PROXIES` | `0` | Number of reverse proxies in front of the app, for correct client IPs |
@@ -140,6 +156,45 @@ All settings are read from environment variables (or `.env`). Defaults live in `
 
 Only deploy this on systems you own or are explicitly authorised to monitor.
 
+## IP reputation enrichment
+
+When a canary fires, or the honeypot first flags a client, the source IP is looked up in every provider you have a key for. All three offer free API keys:
+
+| Provider | What it checks | Treated as malicious when | Get a key |
+| --- | --- | --- | --- |
+| AbuseIPDB | Abuse confidence score and report count | score >= `ABUSEIPDB_MIN_SCORE` | abuseipdb.com/register |
+| abuse.ch ThreatFox | Malware IOC database (C2 servers and similar) | any IOC for this IP | auth.abuse.ch |
+| AlienVault OTX | Community threat "pulses" mentioning the IP | pulses >= `OTX_MIN_PULSES` | otx.alienvault.com |
+
+- The lookup runs in the background, so the trap still responds instantly. The result is stored on the event and added to the Slack alert.
+- Results are cached per IP (`ip_reputation` collection) for `ENRICH_CACHE_HOURS` to save API quota.
+- Private, loopback and reserved addresses are never sent to third parties.
+- An IP is **known** if any provider says malicious, **new** if all providers that answered say clean.
+
+## IOC feeds
+
+| Endpoint | Format | Use it with |
+| --- | --- | --- |
+| `/feeds/stix.json` | STIX 2.1 bundle | OpenCTI, Sentinel, any STIX-aware tool |
+| `/feeds/misp/manifest.json` | MISP feed | MISP (Sync Actions > Feeds > Add feed, type "MISP Feed", URL `https://<host>/feeds/misp`) |
+| `/feeds/iocs.csv` | CSV | Spreadsheets, SIEM lookups, blocklists |
+
+Each feed contains the source IPs of canary triggers and flagged honeypot clients, the user agents seen, and the canary URLs that were triggered. IDs are deterministic, so re-importing updates existing indicators instead of duplicating them. Indicators from IPs already reported elsewhere are marked `malicious-activity` (STIX) / tagged `known-malicious` (MISP); the rest are `anomalous-activity`. User agents are exported for context only (`to_ids: false` in MISP), because they are easy to spoof and widely shared.
+
+Set `FEED_TOKEN` and have consumers send `Authorization: Bearer <token>` (MISP lets you add this as a custom header on the feed), or append `?token=<token>`. Use `?days=7` to narrow the window. This is a plain HTTPS feed, not a TAXII server.
+
+## Analytics dashboard
+
+`/analytics` shows, for the last 7, 30 or 90 days:
+
+- headline counts: canary triggers, honeypot flags, unique source IPs, and new vs already-known attackers
+- triggers over time (daily)
+- triggers per canary type, split by what the agent did (followed the callback URL or tried the fake API key)
+- agents behind the triggers, grouped into families from the user agent (for example OpenAI ChatGPT-User, Anthropic ClaudeBot, Python requests, headless browsers)
+- every source IP with its reputation scores, and the top user agents
+
+The page refreshes when new events arrive. Agent families are a heuristic based on the user agent, which clients can fake.
+
 ## Project structure
 
 ```
@@ -147,6 +202,9 @@ LLM-Deception-Toolkit/
 ├── app.py              # Flask app: trap endpoints, dashboard, real-time updates
 ├── canaries.py         # Canary templates, token generation and registry
 ├── alerts.py           # Slack alerting
+├── enrichment.py       # AbuseIPDB / ThreatFox / OTX lookups with caching
+├── iocs.py             # IOC collection and STIX / MISP / CSV export
+├── analytics.py        # Aggregations and agent classification for /analytics
 ├── config.py           # Configuration from environment variables
 ├── canaries/           # Generated canary files (git-ignored)
 ├── templates/          # Dashboard HTML templates
@@ -190,6 +248,10 @@ LLM-Deception-Toolkit/
 - [ ] Map canary and honeypot events to the OWASP Top 10 for LLM Applications and MITRE ATLAS
 - [x] Authentication for the dashboard
 - [x] Token-based canary triggers with file attribution
+- [x] IP reputation enrichment (AbuseIPDB, ThreatFox, OTX)
+- [x] IOC export as STIX 2.1, MISP feed and CSV
+- [x] Analytics dashboard
+- [ ] TAXII 2.1 server for the STIX feed
 - [ ] Tagged releases and a demo write-up with test results
 
 ## Contributing

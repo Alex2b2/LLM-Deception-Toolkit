@@ -43,6 +43,7 @@
                             <th>File</th>
                             <th>Trigger</th>
                             <th>IP Address</th>
+                            <th>Reputation</th>
                             <th>Timestamp</th>
                         </tr>
                     </thead>
@@ -52,6 +53,7 @@
                             <td><a href="/canary/{{ trigger.file }}">{{ trigger.file }}</a></td>
                             <td>{{ trigger.trigger }}</td>
                             <td>{{ trigger.user_ip }}</td>
+                            <td>{{ trigger.reputation }}</td>
                             <td>{{ trigger.timestamp }}</td>
                         </tr>
                         {% endfor %}
@@ -104,7 +106,7 @@
         });
         fill(document.querySelector("#canary-table tbody"), data.canary, c => [
             cell(c.file, "/canary/" + encodeURIComponent(c.file)),
-            cell(c.trigger), cell(c.user_ip), cell(c.timestamp),
+            cell(c.trigger), cell(c.user_ip), cell(c.reputation), cell(c.timestamp),
         ]);
     });
 </script>
